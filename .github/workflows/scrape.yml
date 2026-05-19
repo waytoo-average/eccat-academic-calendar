@@ -1,0 +1,56 @@
+name: Scrape academic calendar
+
+on:
+  schedule:
+    # Weekly on Mondays during May–August at 07:00 UTC
+    - cron: "0 7 * 5-8 1"
+    # Daily during June–July at 09:00 UTC (announcement most likely then)
+    - cron: "0 9 * 6-7 *"
+  workflow_dispatch:  # Allow manual trigger at any time
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install groq httpx beautifulsoup4 requests --break-system-packages
+
+      - name: Check if calendar already confirmed
+        id: check
+        env:
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: python scripts/check_existing.py
+
+      - name: Run scraper + parser + write to Supabase
+        if: steps.check.outputs.needs_scrape == 'true'
+        env:
+          GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY:     ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scripts/run_scraper.py
+
+      - name: Skip message
+        if: steps.check.outputs.needs_scrape == 'false'
+        run: echo "Calendar already confirmed for this academic year. Skipping LLM call."
+
+      # Commit a status badge on every run to keep the repo active
+      # (prevents GitHub from disabling the scheduled workflow after 60 days of inactivity)
+      - name: Update last-run badge
+        if: always()
+        run: |
+          echo "last_run=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .last_run
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .last_run
+          git diff --staged --quiet || git commit -m "chore: scraper heartbeat $(date -u +%Y-%m-%d)"
+          git push

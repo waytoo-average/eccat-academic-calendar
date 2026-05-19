@@ -1,0 +1,29 @@
+name: Calendar health check
+
+on:
+  schedule:
+    - cron: "0 8 1 7 *"   # July 1st at 08:00 UTC — annual stale-data check
+    - cron: "0 8 * * 1"   # Every Monday at 08:00 UTC — general health ping
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests --break-system-packages
+
+      - name: Run health check
+        env:
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+        run: python scripts/health_check.py
