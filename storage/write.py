@@ -3,17 +3,15 @@ storage/write.py
 Writes a validated calendar dict to Supabase via the `update-calendar` Edge Function.
 
 Security model:
-  - The scraper only holds CALENDAR_WRITE_SECRET (a custom shared secret).
-  - The service_role key NEVER leaves Supabase infrastructure.
-  - The Edge Function validates the secret and performs the DB write server-side.
+  - Authorization: Bearer <anon_key>  — satisfies Supabase's JWT header requirement
+                                        (anon key is already public in all apps)
+  - X-Calendar-Secret: <secret>       — our actual write guard; validated inside
+                                        the Edge Function against CALENDAR_WRITE_SECRET
+                                        env var (set in Supabase Dashboard, never in code)
+  - The service_role key never leaves Supabase infrastructure.
 """
 import os
 import requests
-from datetime import date
-
-
-_SUPABASE_URL   = None   # resolved lazily from env
-_WRITE_SECRET   = None   # resolved lazily from env
 
 
 def _edge_url() -> str:
@@ -23,7 +21,14 @@ def _edge_url() -> str:
     return f"{url}/functions/v1/update-calendar"
 
 
-def _secret() -> str:
+def _anon_key() -> str:
+    key = os.environ.get("SUPABASE_ANON_KEY", "")
+    if not key:
+        raise EnvironmentError("SUPABASE_ANON_KEY env var is not set")
+    return key
+
+
+def _write_secret() -> str:
     secret = os.environ.get("CALENDAR_WRITE_SECRET", "")
     if not secret:
         raise EnvironmentError("CALENDAR_WRITE_SECRET env var is not set")
@@ -33,7 +38,7 @@ def _secret() -> str:
 def write_calendar(cal: dict, source_url: str = "") -> None:
     """
     POST the validated calendar dict to the Supabase Edge Function.
-    The Edge Function holds the service_role key — we never touch it here.
+    Sends anon key as Bearer (JWT check) + custom secret (write guard).
     """
     payload = {
         "active_year":      cal.get("academic_year", "").replace("/", "-"),
@@ -53,14 +58,17 @@ def write_calendar(cal: dict, source_url: str = "") -> None:
     resp = requests.post(
         _edge_url(),
         headers={
-            "Authorization": f"Bearer {_secret()}",
-            "Content-Type":  "application/json",
+            "Authorization":    f"Bearer {_anon_key()}",
+            "X-Calendar-Secret": _write_secret(),
+            "Content-Type":     "application/json",
         },
         json=payload,
         timeout=20,
     )
 
     if resp.status_code == 401:
+        raise PermissionError("Supabase rejected the JWT. Check SUPABASE_ANON_KEY.")
+    if resp.status_code == 403:
         raise PermissionError("Edge Function rejected the write secret. Check CALENDAR_WRITE_SECRET.")
     if resp.status_code == 422:
         raise ValueError(f"Edge Function validation failed: {resp.text}")
@@ -72,7 +80,7 @@ def write_calendar(cal: dict, source_url: str = "") -> None:
 def calendar_already_confirmed(academic_year: str) -> bool:
     """
     Check if a confirmed calendar for academic_year already exists.
-    Uses the public anon key — this is a safe read-only check.
+    Uses the public anon key — safe read-only check.
     """
     supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     anon_key     = os.environ.get("SUPABASE_ANON_KEY", "")
