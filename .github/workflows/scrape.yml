@@ -8,6 +8,9 @@ on:
     - cron: "0 9 * 6-7 *"
   workflow_dispatch:  # Allow manual trigger at any time
 
+permissions:
+  contents: write
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
