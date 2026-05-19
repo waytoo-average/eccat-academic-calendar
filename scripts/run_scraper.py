@@ -37,8 +37,12 @@ def main():
     sources = fetch_all(year)
 
     if not sources:
-        print("⚠️  No text fetched from any source. Network issue?")
-        sys.exit(1)
+        # No sources returned content. This is expected before July when SCU
+        # hasn't published yet. Exit 0 so the workflow doesn't fail — the
+        # health check will alert if still missing by July 1st.
+        print("⚠️  No text fetched from any source. SCU may not have published yet (expected before July).")
+        print("ℹ️  Will retry on next scheduled run. Health check will alert if missing by July 1st.")
+        sys.exit(0)
 
     # Try each source until we get a high/medium confidence result
     best_cal = None
@@ -70,12 +74,27 @@ def main():
                 print(f"  ❌ {e}")
 
     if best_cal is None:
-        print("❌ No source produced a valid calendar. Human review required.")
-        sys.exit(1)
+        # Sources returned text but LLM couldn't extract a valid calendar.
+        # Could mean the announcement hasn't been made yet or text was irrelevant.
+        today = date.today()
+        if today.month < 7:
+            print("⚠️  Could not extract valid calendar — SCU likely hasn't announced yet (before July).")
+            print("ℹ️  Will retry on next scheduled run.")
+            sys.exit(0)
+        else:
+            # July or later — this is a real problem, fail loudly
+            print("❌ No source produced a valid calendar and it's July+. Human review required.")
+            sys.exit(1)
 
     # Write to Supabase
-    source_url = f"https://english.ahram.org.eg" if best_source_name == "ahram" else "https://scu.eg/en/news/"
-    write_calendar(best_cal, source_url=source_url)
+    source_urls = {
+        "youm7":   "https://www.youm7.com",
+        "masrawy": "https://www.masrawy.com",
+        "mhe":     "https://mhe.gov.eg/ar/News",
+        "scu":     "https://scu.eg/en/news/",
+        "ahram":   "https://english.ahram.org.eg",
+    }
+    write_calendar(best_cal, source_url=source_urls.get(best_source_name, ""))
     print(f"🎉 Done — {academic_year} calendar written to Supabase.")
     sys.exit(0)
 

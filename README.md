@@ -1,10 +1,40 @@
 # ECCAT Academic Calendar Scraper
 
-Automatically scrapes the Egyptian Supreme Council of Universities (SCU) annual
-academic calendar announcement and writes it to the ECCAT Supabase `app_config` table.
+Fully automated, zero-cost system that:
+1. **Scrapes** the Egyptian SCU academic calendar announcement every year
+2. **Writes** semester start/end dates to the Supabase `app_config` table
+3. **Auto-switches** `active_semester` daily based on today's date vs the stored dates
+4. **Alerts** you if something goes wrong (ntfy push notification)
 
-**Stack:** Python + Groq (free LLM) + GitHub Actions (free cron) + Supabase Edge Function  
-**Cost:** $0
+No human action needed under normal operation — not this year, not next year.
+
+---
+
+## Automation overview
+
+```
+Every year (June–July)                    Every day (00:05 UTC)
+──────────────────────                    ─────────────────────
+GitHub Actions cron                       Supabase pg_cron
+  │                                         │
+  │  Scrape SCU announcement                │  SELECT refresh_active_semester()
+  │  (DuckDuckGo → Youm7 → Masrawy          │
+  │   → MHE → SCU direct)                  │  Updates active_semester in
+  │                                         │  app_config based on today
+  │  Groq LLM extracts dates               │  vs semester_2_start date
+  │                                         │
+  │  Validator checks dates                ▼
+  │                                       app_config.active_semester
+  │  POST to update-calendar              auto-switches on the correct day
+  │  Edge Function
+  │
+  ▼
+app_config updated with new year's dates
+```
+
+**`active_semester` is fully automatic** — it switches from "Semester 1" to
+"Semester 2" on `semester_2_start` day with no manual action. The same happens
+in reverse for the next academic year once the scraper writes new dates.
 
 ---
 
@@ -14,30 +44,17 @@ academic calendar announcement and writes it to the ECCAT Supabase `app_config` 
 GitHub Actions scraper
         │
         │  POST /functions/v1/update-calendar
-        │  Authorization: Bearer <CALENDAR_WRITE_SECRET>
+        │  Authorization: Bearer <anon_key>   (satisfies Supabase JWT check)
+        │  X-Calendar-Secret: <secret>        (our write guard)
         ▼
 Supabase Edge Function  (update-calendar)
-        │  validates secret from Deno.env
+        │  validates X-Calendar-Secret from Deno.env
         │  uses service_role key internally — never exposed outside Supabase
         ▼
 app_config table
 ```
 
-The scraper **never holds the service_role key**. It only holds:
-- `SUPABASE_ANON_KEY` — public read-only key, safe to expose
-- `CALENDAR_WRITE_SECRET` — a custom shared secret you generate; useless without the Edge Function
-
----
-
-## How it works
-
-1. GitHub Actions runs weekly from May, daily in June–July
-2. Checks if a confirmed calendar already exists for this academic year (skip if yes)
-3. Fetches raw text from SCU news page and Al-Ahram English
-4. Groq LLM (`llama-3.1-8b-instant`) extracts structured dates
-5. Validator applies deterministic sanity checks (semester months, lengths, chronology)
-6. On pass: POSTs to `update-calendar` Edge Function → DB write happens server-side
-7. All 4 ECCAT apps pick up the new dates on next launch via `AppConfigService`
+The scraper never holds the service_role key.
 
 ---
 
@@ -48,79 +65,85 @@ Public repos get unlimited free GitHub Actions minutes.
 
 ### 2. Set the Edge Function secret in Supabase
 
-Go to **Supabase Dashboard → Edge Functions → update-calendar → Secrets** and add:
+**Supabase Dashboard → Edge Functions → update-calendar → Secrets:**
 
 | Key | Value |
 |-----|-------|
-| `CALENDAR_WRITE_SECRET` | A strong random string (generate with `openssl rand -hex 32`) |
-
-The `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are automatically available
-inside every Edge Function — you do not need to set them manually.
+| `CALENDAR_WRITE_SECRET` | A strong random string (`openssl rand -hex 32`) |
 
 ### 3. Add GitHub Actions secrets
 
-Go to **Settings → Secrets and variables → Actions** and add:
+**Repo Settings → Secrets and variables → Actions:**
 
 | Secret | Value |
 |--------|-------|
 | `SUPABASE_URL` | `https://vqxvkpbbwssywdntitjf.supabase.co` |
-| `SUPABASE_ANON_KEY` | The anon/public key from Supabase Dashboard (safe — read-only) |
-| `CALENDAR_WRITE_SECRET` | The **same** value you set in the Edge Function secret above |
+| `SUPABASE_ANON_KEY` | Anon/public key from Supabase Dashboard |
+| `CALENDAR_WRITE_SECRET` | Same value as the Edge Function secret above |
 | `GROQ_API_KEY` | From [console.groq.com](https://console.groq.com) — free account |
-| `NTFY_TOPIC` | A unique topic string e.g. `eccat-calendar-alerts-xyz` — for push alerts via [ntfy.sh](https://ntfy.sh) (free, no account needed) |
+| `NTFY_TOPIC` | Any unique string — subscribe in ntfy app for alerts |
 
-> The `SUPABASE_SERVICE_ROLE_KEY` is **not** a GitHub secret and is **never** used by the scraper.
+> `SUPABASE_SERVICE_ROLE_KEY` is **never** used by the scraper.
 
-### 4. Push this repo to GitHub
+### 4. Enable workflow write permissions
+
+**Repo Settings → Actions → General → Workflow permissions → Read and write permissions**
+
+### 5. Push and test
 
 ```bash
-git init
-git add .
-git commit -m "Initial commit"
+git init && git add . && git commit -m "Initial commit"
 git remote add origin https://github.com/YOUR_ORG/eccat-academic-calendar.git
 git push -u origin main
 ```
 
-### 5. Test manually
+Trigger manually: **Actions → Scrape academic calendar → Run workflow**
 
-Trigger the scraper once from **Actions → Scrape academic calendar → Run workflow**
-to verify the end-to-end flow before the scheduled runs begin.
+---
+
+## Cron schedule
+
+| Job | When | Purpose |
+|-----|------|---------|
+| GitHub Actions `scrape.yml` | Weekly May–Aug, daily June–July | Fetch + write new year's dates |
+| GitHub Actions `health_check.yml` | Every Monday + July 1st | Alert if dates are stale |
+| Supabase pg_cron | Daily at 00:05 UTC | Auto-switch `active_semester` |
 
 ---
 
 ## Receiving alerts
 
-Install the **ntfy** app on your phone:
+Install **ntfy** on your phone, subscribe to your `NTFY_TOPIC` string.
+You'll be alerted if the health check finds no confirmed calendar by July.
+
 - Android: [ntfy on Play Store](https://play.google.com/store/apps/details?id=io.heckel.ntfy)
 - iOS: [ntfy on App Store](https://apps.apple.com/app/ntfy/id1625396347)
 
-Subscribe to your topic name (same as `NTFY_TOPIC` secret).
-You'll get a push notification if the health check finds a problem.
-
 ---
 
-## Yearly maintenance (normal operation)
+## Yearly maintenance (expected: zero)
 
-Under normal operation you should receive a notification in June/July confirming
-the new calendar was saved. That's the only interaction expected.
+Under normal operation you receive one ntfy notification per year confirming
+the new calendar was saved. Nothing else is needed.
 
 If no notification arrives by **July 15**:
-1. Check the Actions tab for failed runs
-2. If scraper failed: manually update the `app_config` row in Supabase Dashboard:
+1. Check **Actions** tab for failed runs
+2. Manually update `app_config` via Supabase Dashboard SQL editor:
 
 ```sql
 UPDATE app_config SET
-  active_year      = '2025-2026',
-  year_start       = '2025-09-20',
-  year_end         = '2026-06-30',
-  semester_1_start = '2025-09-20',
-  semester_1_end   = '2026-01-08',
-  semester_2_start = '2026-02-07',
-  semester_2_end   = '2026-06-30',
+  active_year      = '2026-2027',
+  year_start       = '2026-09-19',
+  year_end         = '2027-05-20',
+  semester_1_start = '2026-09-19',
+  semester_1_end   = '2027-01-07',
+  semester_2_start = '2027-02-06',
+  semester_2_end   = '2027-05-20',
   source_name      = 'admin',
   confirmed        = true,
   updated_at       = now()
 WHERE id = 1;
+-- active_semester will be auto-derived by the trigger
 ```
 
 ---
@@ -130,18 +153,18 @@ WHERE id = 1;
 ```
 eccat-academic-calendar/
 ├── .github/workflows/
-│   ├── scrape.yml          — Main scraper cron (May–Aug)
+│   ├── scrape.yml          — Scraper cron (May–Aug)
 │   └── health_check.yml    — Weekly + July 1st health check
 ├── scraper/
-│   └── fetch.py            — HTTP fetch from SCU + Al-Ahram
+│   └── fetch.py            — Multi-source fetcher (DDG → Youm7 → Masrawy → MHE → SCU)
 ├── parser/
-│   ├── extract.py          — Groq LLM date extraction
+│   ├── extract.py          — Groq LLM date extraction (llama-3.1-8b-instant)
 │   └── validate.py         — Deterministic sanity checks
 ├── storage/
-│   └── write.py            — POST to Supabase Edge Function (no service key)
+│   └── write.py            — POST to Supabase Edge Function
 ├── scripts/
 │   ├── run_scraper.py      — Main orchestrator
-│   ├── check_existing.py   — Skip guard (sets needs_scrape output)
+│   ├── check_existing.py   — Skip guard
 │   └── health_check.py     — Stale-data detector + ntfy alert
 ├── requirements.txt
 └── README.md
@@ -149,19 +172,17 @@ eccat-academic-calendar/
 
 ---
 
-## app_config columns written
+## app_config columns written by scraper
 
-| Column | Example |
-|--------|---------|
-| `active_year` | `2025-2026` |
-| `year_start` | `2025-09-20` |
-| `year_end` | `2026-06-30` |
-| `semester_1_start` | `2025-09-20` |
-| `semester_1_end` | `2026-01-08` |
-| `semester_2_start` | `2026-02-07` |
-| `semester_2_end` | `2026-06-30` |
-| `source_name` | `scu` / `ahram` / `admin` |
-| `confirmed` | `true` |
-
-The `active_semester` field is **not written by the scraper** — it is managed
-manually since semester switching is a deliberate operational decision.
+| Column | Example | Auto-managed? |
+|--------|---------|---------------|
+| `active_year` | `2025-2026` | By scraper |
+| `year_start` | `2025-09-20` | By scraper |
+| `year_end` | `2026-05-21` | By scraper |
+| `semester_1_start` | `2025-09-20` | By scraper |
+| `semester_1_end` | `2026-01-01` | By scraper |
+| `semester_2_start` | `2026-02-07` | By scraper |
+| `semester_2_end` | `2026-05-21` | By scraper |
+| `active_semester` | `Semester 1` or `Semester 2` | **By pg_cron daily** |
+| `source_name` | `duckduckgo` / `youm7` / `admin` | By scraper |
+| `confirmed` | `true` | By scraper |
